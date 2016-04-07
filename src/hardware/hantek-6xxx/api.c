@@ -60,7 +60,7 @@ static const struct hantek_6xxx_profile dev_profiles[] = {
 		"Hantek", "6022BE", "hantek-6022be.fw",
 	},
 	{
-		0x8102, 0x8102, 0x04b5, 0x6022,
+		0x8102, 0x8102, 0x8102, 0xd120, //0x04b5, 0x6022, 
 		"Sainsmart", "DDS120", "sainsmart-dds120.fw",
 	},
 	ALL_ZERO
@@ -551,8 +551,14 @@ static uint32_t data_amount(const struct sr_dev_inst *sdi)
 		data_left = devc->samplerate * NUM_CHANNELS;
 	}
 
+#ifdef __APPLE__
+	uint32_t i = 512;
+	while (i < data_left)
+		i *= 2;
+	data_left = i;
+#else
 	data_left += MIN_PACKET_SIZE; /* Driver does not handle small buffers. */
-
+#endif
 	sr_spew("data_amount %u", data_left);
 
 	return data_left;
@@ -649,7 +655,12 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 	sdi = transfer->user_data;
 	devc = sdi->priv;
 
+	sr_dbg("receive_transfer, state: %d, data_amout: %d\n", devc->dev_state,  data_amount(sdi));
+	
 	if (devc->dev_state == FLUSH) {
+		sr_spew("receive_transfer(): status %s received %d bytes.",
+				libusb_error_name(transfer->status), transfer->actual_length);
+//		libusb_free_transfer(transfer);
 		devc->dev_state = CAPTURE;
 		devc->aq_started = g_get_monotonic_time();
 		read_channel(sdi, data_amount(sdi));
@@ -687,10 +698,11 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 	sr_spew("receive_transfer(): status %s received %d bytes.",
 		libusb_error_name(transfer->status), transfer->actual_length);
 
-	if (transfer->actual_length == 0)
+	if (transfer->actual_length == 0) {
 		/* Nothing to send to the bus. */
 		return;
-
+	}
+	
 	if (devc->limit_samples && devc->samp_received >= devc->limit_samples) {
 		sr_info("Requested number of samples reached, stopping. %"
 			PRIu64 " <= %" PRIu64, devc->limit_samples,
@@ -707,6 +719,7 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 		devc->sample_buf = NULL;
 		sdi->driver->dev_acquisition_stop(sdi, NULL);
 	} else {
+		libusb_free_transfer(transfer);
 		read_channel(sdi, data_amount(sdi));
 	}
 }
@@ -743,10 +756,14 @@ static int handle_event(int fd, int revents, void *cb_data)
 	drvc = di->context;
 	devc = sdi->priv;
 
+	sr_dbg("handle_event, state: %d\n", devc->dev_state);
+	
 	/* Always handle pending libusb events. */
 	tv.tv_sec = tv.tv_usec = 0;
 	libusb_handle_events_timeout(drvc->sr_ctx->libusb_ctx, &tv);
 
+	sr_dbg("event handled!\n");
+	
 	if (devc->dev_state == STOPPING) {
 		/* We've been told to wind up the acquisition. */
 		sr_dbg("Stopping acquisition.");
@@ -776,6 +793,8 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi, void *cb_data)
 	struct sr_dev_driver *di = sdi->driver;
 	struct drv_context *drvc = di->context;
 
+	sr_dbg("STARTING!!!\n");
+
 	if (sdi->status != SR_ST_ACTIVE)
 		return SR_ERR_DEV_CLOSED;
 
@@ -794,15 +813,25 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi, void *cb_data)
 	std_session_send_df_header(cb_data, LOG_PREFIX);
 
 	devc->samp_received = 0;
+#if FLUSH_PACKET_SIZE > 0
 	devc->dev_state = FLUSH;
-
+#else
+	devc->dev_state = CAPTURE;
+#endif
+	
 	usb_source_add(sdi->session, drvc->sr_ctx, TICK,
 		       handle_event, (void *)sdi);
 
 	hantek_6xxx_start_data_collecting(sdi);
 
+#if FLUSH_PACKET_SIZE > 0
 	read_channel(sdi, FLUSH_PACKET_SIZE);
-
+#else
+	devc->aq_started = g_get_monotonic_time();
+	read_channel(sdi, data_amount(sdi));
+#endif
+	
+	sr_dbg("START!!!\n");
 	return SR_OK;
 }
 
@@ -820,6 +849,7 @@ static int dev_acquisition_stop(struct sr_dev_inst *sdi, void *cb_data)
 
 	g_free(devc->sample_buf); devc->sample_buf = NULL;
 
+	sr_dbg("STOP!!!\n");
 	return SR_OK;
 }
 
