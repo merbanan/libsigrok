@@ -112,7 +112,7 @@ SR_PRIV int hantek_6xxx_get_channeldata(const struct sr_dev_inst *sdi,
 	int ret;
 	unsigned char *buf;
 
-	sr_dbg("Request channel data.");
+	sr_dbg("hantek_6xxx_get_channeldata data_amount: %d\n", data_amount);
 
 	usb = sdi->conn;
 
